@@ -1,0 +1,809 @@
+---
+title: "Final Project v1"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+if(!require("pacman")) install.packages("pacman")
+pacman::p_load(ISLR, dplyr, glmnet, leaps, car, tidyverse, bestglm, mapproj, aod,tree, randomForest,rpart, rattle, pROC, partykit, ggplot2, tableone, GGally, reshape2, pander)
+
+
+if(!require("car")) install.packages("car")
+
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+```{r}
+# clearing variables
+rm(list=ls())
+
+# reading in data
+tournament.data <- read.csv("NCAATourneyCompactResults.csv")
+team.data <- read.csv("Teams.csv")
+conference.data <- read.csv("TeamConferences.csv")
+seed.data <- read.csv("NCAATourneySeeds.csv")
+coach.data <- read.csv("TeamCoaches.csv")
+
+#ADJUSTING CONFERENCE VARIABLES 
+
+#removing years before 2003
+tournament.data <- tournament.data[!(tournament.data$Season<2003),]
+
+
+# adding seed & region
+seed.data$Region <- substr(seed.data$Seed, 0, 1)
+seed.data$Seed <- substr(seed.data$Seed, 2, 3)
+seed.data$Seed <- as.numeric(as.character(seed.data$Seed))
+tournament.data$RegionWinner <- "abcd"
+tournament.data$RegionLoser <- "abcd"
+tournament.data$SeedWinner <- 0
+tournament.data$SeedLoser <- 0
+
+for (i in 1:2219) {
+loc <- which(tournament.data$Season == seed.data$Season[i] & tournament.data$WTeamID == seed.data$TeamID[i])  
+tournament.data$RegionWinner[loc] <- seed.data$Region[i]
+}
+for (i in 1:2219) {
+loc <- which(tournament.data$Season == seed.data$Season[i] & tournament.data$LTeamID == seed.data$TeamID[i])  
+tournament.data$RegionLoser[loc] <- seed.data$Region[i]
+}
+
+for (i in 1:2219) {
+loc <- which(tournament.data$Season == seed.data$Season[i] & tournament.data$WTeamID == seed.data$TeamID[i])  
+tournament.data$SeedWinner[loc] <- seed.data$Seed[i]
+}
+for (i in 1:2219) {
+loc <- which(tournament.data$Season == seed.data$Season[i] & tournament.data$LTeamID == seed.data$TeamID[i])  
+tournament.data$SeedLoser[loc] <- seed.data$Seed[i]
+}
+
+# adding binary variable (is it an upset?)
+tournament.data$Upset <- 0
+for (i in 1:1048) {
+  if(tournament.data$SeedLoser[i] < tournament.data$SeedWinner[i]) {
+    tournament.data$Upset[i] <- 1
+  }
+}
+
+# Reorgnizing into high and low seed teams 
+tournament.data$HiSeedid <- 0
+tournament.data$LoSeedid <- 0
+
+for (i in 1:1048) {
+  if (tournament.data$Upset[i] == 0 ) {
+    tournament.data$HiSeedid[i] <- tournament.data$WTeamID[i]
+    tournament.data$LoSeedid[i] <- tournament.data$LTeamID[i]
+  }
+  else {
+    tournament.data$HiSeedid[i] <- tournament.data$LTeamID[i] 
+    tournament.data$LoSeedid[i] <- tournament.data$WTeamID[i]
+  }
+}
+
+# adding conference data
+tournament.data$HiSeedConference <- "at-large"
+tournament.data$LoSeedConference <- "at-large"
+tournament.data$HiSeedConference <- as.character(tournament.data$HiSeedConference)
+tournament.data$LoSeedConference <- as.character(tournament.data$LoSeedConference)
+conference.data$ConfAbbrev <- as.character(conference.data$ConfAbbrev)
+
+for (i in 1:11242) {
+loc <- which(tournament.data$Season == conference.data$Season[i] & tournament.data$HiSeedid == conference.data$TeamID[i])  
+tournament.data$HiSeedConference[loc] <- conference.data$ConfAbbrev[i]
+}
+for (i in 1:11242) {
+loc <- which(tournament.data$Season == conference.data$Season[i] & tournament.data$LoTeamid == conference.data$TeamID[i])  
+tournament.data$LoSeedConference[loc] <- conference.data$ConfAbbrev[i]
+}
+
+# Resetting daynum to categorical variable of tournament stage
+tournament.data$DayNum[tournament.data$DayNum >= 134 & tournament.data$DayNum <= 135] <- "First Four"
+tournament.data$DayNum[tournament.data$DayNum >= 136 & tournament.data$DayNum <= 137] <- "Round 1"
+tournament.data$DayNum[tournament.data$DayNum >= 138 & tournament.data$DayNum <= 139] <- "Round 2"
+tournament.data$DayNum[tournament.data$DayNum >= 143 & tournament.data$DayNum <= 144] <- "Sweet Sixteen"
+tournament.data$DayNum[tournament.data$DayNum >= 145 & tournament.data$DayNum <= 146] <- "Elite Eight"
+tournament.data$DayNum[tournament.data$DayNum == 152 ] <- "Final Four"
+tournament.data$DayNum[tournament.data$DayNum == 154 ] <- "Final"
+
+# adding coach data
+tournament.data$HiSeedCoachTenure <- 0
+tournament.data$LoSeedCoachTenure <- 0
+
+for (i in 1:10995) {
+loc <- which(tournament.data$Season == coach.data$Season[i] & tournament.data$HiSeedid == coach.data$TeamID[i])  
+tournament.data$HiSeedCoachTenure[loc] <- coach.data$Coach.Tenure[i]
+}
+for (i in 1:10995) {
+loc <- which(tournament.data$Season == coach.data$Season[i] & tournament.data$LoSeedid == coach.data$TeamID[i])  
+tournament.data$LoSeedCoachTenure[loc] <- coach.data$Coach.Tenure[i]
+}
+
+# adding seeding
+tournament.data$HiSeedrank <- 0
+tournament.data$LoSeedrank <- 0
+
+for (i in 1:1048) {
+  X <- c(tournament.data$SeedLoser[i], tournament.data$SeedWinner[i])
+  tournament.data$HiSeedrank[i] <- min(X)  
+  tournament.data$LoSeedrank[i] <- max(X)  
+}
+
+#converting variable to factors
+tournament.data$Upset <- as.factor(tournament.data$Upset)
+tournament.data$HiSeedConference <- as.factor(tournament.data$HiSeedConference)
+tournament.data$LoSeedConference <- as.factor(tournament.data$LoSeedConference)
+tournament.data$DayNum <- as.factor(tournament.data$DayNum)
+
+tournament.data <- tournament.data %>% select (-RegionWinner, -RegionLoser, -RegionWinner, -RegionLoser, -WLoc, -NumOT, -LTeamID, -WTeamID, -SeedWinner, -SeedLoser)
+
+str(tournament.data)
+
+```
+
+
+
+```{r}
+#ADDING REGULAR SEASON VARIABLES 
+regseason.data <- read.csv("RegularSeasonDetailedResults.csv")
+
+
+# creating stat for field goals success rates
+regseason.data$winner.percentfieldgoals <- regseason.data$WFGM/regseason.data$WFGA
+regseason.data$loser.percentfieldgoals <- regseason.data$LFGM/regseason.data$LFGA
+
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(winner.percentfieldgoals))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SPFG <- 0
+tournament.data$LoSeed.SPFG <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SPFG[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SPFG[loc2] <- regman$meanpercent[i]
+}
+
+#regman.spread <- regman %>% spread(key = WTeamID, value = meanpercent)
+#str(regman.spread)
+
+# three-pointers attempted
+regseason.data$winner.percentthreepointers <- regseason.data$WFGM3/regseason.data$WFGA3
+regseason.data$loser.percentthreepointers <- regseason.data$LFGM3/regseason.data$LFGA3
+
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(winner.percentthreepointers))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SP3P <- 0
+tournament.data$LoSeed.SP3P <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SP3P[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SP3P[loc2] <- regman$meanpercent[i]
+}
+
+# offensive rebounds attempted
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(WOR))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SMOR <- 0
+tournament.data$LoSeed.SMOR <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SMOR[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SMOR[loc2] <- regman$meanpercent[i]
+}
+
+# defensive rebounds attempted
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(WDR))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SMDR <- 0
+tournament.data$LoSeed.SMDR <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SMDR[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SMDR[loc2] <- regman$meanpercent[i]
+}
+
+# Assists
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(WAst))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SMAS <- 0
+tournament.data$LoSeed.SMAS <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SMAS[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SMAS[loc2] <- regman$meanpercent[i]
+}
+
+# Steals
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(WStl))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SMST <- 0
+tournament.data$LoSeed.SMST <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SMST[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SMST[loc2] <- regman$meanpercent[i]
+}
+
+# Blocks
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(WBlk))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.SMBK <- 0
+tournament.data$LoSeed.SMBK <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.SMBK[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.SMBK[loc2] <- regman$meanpercent[i]
+}
+
+# Winner & Loser Margin
+regman <- regseason.data %>%
+  group_by(WTeamID, Season) %>%
+  summarise(meanpercent = mean(WScore-LScore))
+regman <- as.data.frame(regman)
+
+tournament.data$HiSeed.margin <- 0
+tournament.data$LoSeed.margin <- 0
+
+for (i in 1:5829) {
+  loc <- which(tournament.data$Season == regman$Season[i] & tournament.data$HiSeedid == regman$WTeamID[i])  
+  tournament.data$HiSeed.margin[loc] <- regman$meanpercent[i]
+  loc2 <- which(tournament.data$Season == regman$Season[i] & tournament.data$LoSeedid == regman$WTeamID[i])  
+  tournament.data$LoSeed.margin[loc2] <- regman$meanpercent[i]
+}
+
+#removing id variables 
+tournament.data <- tournament.data %>% 
+  select(-WScore, -LScore, -HiSeedid, -LoSeedid)
+
+str(tournament.data)
+
+summary(tournament.data$Upset)
+```
+
+
+```{r}
+#INITIAL EDA - CONTINUOUS VARIABLES
+
+barplot(table(tournament.data$Upset),
+     main = "Tournament Upsets",
+     xlab = "Tournament Upsets",
+     col = "dark green")
+
+hist(tournament.data$HiSeedCoachTenure,
+     main = "High Seed Wnis: Coach Lifetime Tenure",
+     xlab = "High Seed Wins: Coach Lifetime Tenure",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeedCoachTenure,
+     main = "Low Seed Wins: Coach Lifetime Tenure",
+     xlab = "Low Seed Wins: Coach Lifetime Tenuree",
+     col = "dark magenta")
+
+
+hist(tournament.data$HiSeed.SPFG,
+     main = "High Seed Wins: Percentage Field Goals/Season",
+     xlab = "High Seed Wins: Percentage Field Goals/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SPFG,
+     main = "Low Seed Wins: Percentage Field Goals/Season",
+     xlab = "Low Seed Wins: Percentage Field Goals/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.SP3P,
+     main = "High Seed Wins: Percentage 3-Pointers/Season",
+     xlab = "High Seed Wins: Percentage 3-Pointers/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SP3P,
+     main = "Low Seed Wins: Percentage 3-Pointers/Season",
+     xlab = "Low Seed Wins: Percentage 3-Pointers/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.SMOR,
+     main = "High Seed Wins: Offensive Rebounds/Season",
+     xlab = "High Seed Wins: Offensive Rebounds//Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SMOR,
+     main = "Low Seed Wins: Offensive Rebounds/Season",
+     xlab = "Low Seed Wins: Offensive Rebounds//Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.SMDR,
+     main = "High Seed Wins: Defensive Rebounds/Season",
+     xlab = "High Seed Wins: Defensive Rebounds//Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SMDR,
+     main = "Low Seed Wins: Defensive Rebounds/Season",
+     xlab = "Low Seed Wins: Defensive Rebounds//Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.SMDR,
+     main = "High Seed Wins: Assists/Season",
+     xlab = "High Seed Wins: Assists/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SMDR,
+     main = "Low Seed Wins: Assists/Season",
+     xlab = "Low Seed Wins: Assists/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.SMST,
+     main = "High Seed Wins: Steals/Season",
+     xlab = "High Seed Wins: Sealss/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SMST,
+     main = "Low Seed Wins: Steals/Season",
+     xlab = "Low Seed Wins: Steals/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.SMBK,
+     main = "High Seed Wins: Blocks/Season",
+     xlab = "High Seed Wins: Blocks/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.SMBK,
+     main = "Low Seed Wins: Blocks/Season",
+     xlab = "Low Seed Wins: Blocks/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.margin,
+     main = "High Seed Wins: win Margin/Season",
+     xlab = "High Seed Wins: Win Margin/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.margin,
+     main = "Low Seed Wins: Win Margin/Season",
+     xlab = "Low Seed Wins: Win Margin/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeed.margin,
+     main = "High Seed Wins: win Margin/Season",
+     xlab = "High Seed Wins: Win Margin/Season",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeed.margin,
+     main = "Low Seed Wins: Win Margin/Season",
+     xlab = "Low Seed Wins: Win Margin/Season",
+     col = "dark magenta")
+
+hist(tournament.data$HiSeedrank,
+     main = "High Seed Wins: High Seed Rank",
+     xlab = "High Seed Wins: High Seed Rank",
+     col = "dark magenta")
+
+hist(tournament.data$LoSeedrank,
+     main = "Low Seed Wins: Low Seed Rank",
+     xlab = "Low Seed Wins: Low Seed Rank",
+     col = "dark magenta")
+
+ggplot(tournament.data) + 
+geom_boxplot(aes(x = Upset, y = HiSeedCoachTenure)) +
+  labs(x = "Upsets", y = "High Seed Coach Lifetime Tenure")
+  theme_gray()
+
+ggplot(tournament.data) +  #Shows a little variability
+geom_boxplot(aes(x = Upset, y = LoSeedCoachTenure)) +
+  labs(x = "Upsets", y = "Low SEed Coach Lifetime Tenure")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = HiSeed.SPFG)) +
+  labs(x = "Upsets", y = "Season Field Goal Percentage: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = LoSeed.SPFG)) +
+  labs(x = "Upsets", y = "Season Field Goal Percentage: Winner")
+  theme_gray()
+
+  ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = HiSeed.SMOR)) +
+  labs(x = "Upsets", y = "Season Mean Offensive Rebounds: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = LoSeed.SMOR)) +
+  labs(x = "Upsets", y = "Season Mean Offensive Rebounds: Loser")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = HiSeed.SP3P)) +
+  labs(x = "Upsets", y = "Season Mean 3-Pointers: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = LoSeed.SP3P)) +
+  labs(x = "Upsets", y = "Season Mean 3-Pointers: Winner")
+  theme_gray()
+  
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = HiSeed.SMDR)) +
+  labs(x = "Upsets", y = "Season Mean Defensive Rebounds: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = LoSeed.SMDR)) +
+  labs(x = "Upsets", y = "Season Mean Defensive Rebounds: Loser")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = HiSeed.SMAS)) +
+  labs(x = "Upsets", y = "Season Mean Assists: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +
+geom_boxplot(aes(x = Upset, y = LoSeed.SMAS)) +
+  labs(x = "Upsets", y = "Season Mean Assists: Loser")
+  theme_gray()
+
+ggplot(tournament.data) +  #Shows a little variability
+geom_boxplot(aes(x = Upset, y = HiSeed.SMBK)) +
+  labs(x = "Upsets", y = "Season Mean Blocks: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +  #Shows a little variability
+geom_boxplot(aes(x = Upset, y = LoSeed.SMBK)) +
+  labs(x = "Upsets", y = "Season Mean Blocks: Loser")
+  theme_gray()
+
+ggplot(tournament.data) +  #REMOVED FOR COLLINEARITY
+geom_boxplot(aes(x = Upset, y = HiSeed.margin)) +
+  labs(x = "Upsets", y = "Season Mean Win Margin: Winner")
+  theme_gray()
+
+ggplot(tournament.data) +  #Shows a little variability
+geom_boxplot(aes(x = Upset, y = LoSeed.margin)) +
+  labs(x = "Upsets", y = "Season Mean Win Margin: Loser")
+  theme_gray()
+
+ggplot(tournament.data) +  
+geom_boxplot(aes(x = Upset, y = HiSeedrank)) +
+  labs(x = "Upsets", y = "High Seed Wins: Seeding")
+  theme_gray()
+
+ggplot(tournament.data) +  
+geom_boxplot(aes(x = Upset, y = LoSeedrank)) +
+  labs(x = "Upsets", y = "Low Seed Wins: Seeding")
+  theme_gray()
+
+ggplot(tournament.data, aes(x=tournament.data$HiSeedrank, y=tournament.data$LoSeedrank, col = c("Non-Upset","Upset")[Upset])) +
+  geom_point() +
+  labs(x="High Seed Rank", y="Low Seed Rank") 
+
+```
+
+
+```{r}
+
+#Corr heatmap
+plotData <-melt(cor(tournament.data[sapply(tournament.data, is.numeric)]))
+ggplot(plotData ,
+    aes(x = Var1, y = Var2, fill =value)) +
+    geom_tile() +
+    ylab("") +
+    xlab("") +
+    theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+    scale_x_discrete(limits = rev(levels(plotData$Var2))) + #Flip the x- or y-axis
+    scale_fill_gradient( low = "#56B1F7", high = "#132B43") +     #lightblue to darkblue
+    #scale_fill_gradient( low = "white", high = "black") + #white to black
+       guides(fill = guide_legend(title = "Correlation"))
+
+#Continuous variables: checking for collinearity
+cont.var <- tournament.data %>% select(HiSeedCoachTenure, LoSeedCoachTenure, HiSeed.SPFG, HiSeed.SP3P, HiSeed.SMOR, HiSeed.SMDR, HiSeed.SMAS, HiSeed.SMST, HiSeed.SMBK, HiSeed.margin, LoSeed.SPFG, LoSeed.SP3P, LoSeed.SMOR, LoSeed.SMDR,LoSeed.SMAS, LoSeed.SMST, LoSeed.SMBK, LoSeed.margin, HiSeedrank, LoSeedrank, Upset)
+
+#Evaluting Significance
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+pander(Anova(cont.var.test))
+tournament.data <- tournament.data %>% 
+  select(-LoSeed.SMAS)
+cont.var <- cont.var %>% 
+  select(-LoSeed.SMAS)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+tournament.data <- tournament.data %>% 
+  select(-LoSeedCoachTenure)
+cont.var <- cont.var %>% 
+  select(-LoSeedCoachTenure)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+tournament.data <- tournament.data %>% 
+  select(-LoSeed.SMOR)
+cont.var <- cont.var %>% 
+  select(-LoSeed.SMOR)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+tournament.data <- tournament.data %>% 
+  select(-LoSeed.SMST)
+cont.var <- cont.var %>% 
+  select(-LoSeed.SMST)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+tournament.data <- tournament.data %>% 
+  select(-HiSeed.SMBK)
+cont.var <- cont.var %>% 
+  select(-HiSeed.SMBK)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+tournament.data <- tournament.data %>% 
+  select(-HiSeed.SMST)
+cont.var <- cont.var %>% 
+  select(-HiSeed.SMST)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+tournament.data <- tournament.data %>% 
+  select(-HiSeed.SMOR)
+cont.var <- cont.var %>% 
+  select(-HiSeed.SMOR)
+
+cont.var.test <- glm(Upset ~ ., cont.var, family = binomial)
+Anova(cont.var.test)
+pander(summary(cont.var.test))
+str(cont.var)
+pairs(cont.var)
+
+```
+
+You can also embed plots, for example:
+
+```{r}
+#CATEGORICAL VARIABLE AnALYSIS
+
+dat <- data.frame(table(tournament.data$Season,tournament.data$Upset))
+names(dat) <- c("Season","Upset","Count")
+ggplot(data=dat, aes(x=Season, y=Count, fill=Upset)) + geom_bar(stat="identity")
+
+dat <- data.frame(table(tournament.data$DayNum,tournament.data$Upset))
+names(dat) <- c("Round","Upset","Count")
+ggplot(data=dat, aes(x=reorder(Round, -Count), y=Count, fill=Upset)) + geom_bar(stat="identity")
+
+dat <- data.frame(table(tournament.data$HiSeedConference,tournament.data$Upset))
+names(dat) <- c("High_Seed_Conference","Upset","Count")
+ggplot(data=dat, aes(x=reorder(High_Seed_Conference,-Count), y=Count, fill=Upset), xaxt = "n") + geom_bar(stat="identity") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+dat <- data.frame(table(tournament.data$LoSeedConference,tournament.data$Upset))
+names(dat) <- c("Low_Seed_Conference","Upset","Count")
+ggplot(data=dat, aes(x=reorder(Low_Seed_Conference,-Count), y=Count, fill=Upset)) + geom_bar(stat="identity") 
+
+tournament.data <- tournament.data %>% 
+  select(-LoSeedConference)
+
+
+```
+
+
+```{r}
+#CATEGORICAL SIGNIFICANCE
+
+cat.test <- tournament.data %>% select(Season, DayNum, HiSeedConference, Upset)
+fit.cat.test <- glm(Upset ~ ., cat.test, family = binomial)
+Anova(fit.cat.test)
+
+tournament.data <- tournament.data %>% 
+  select(-Season)
+
+```
+
+
+```{r}
+#Linear Regression w/ LASSO
+train  = 0.7 * 1048
+test = 0.2 * 1048
+validate = 0.1* 1048
+train_indices <- 1:733
+test_indices <- 734:942
+validate_indices <- 943:1048
+
+data.train <- tournament.data[train_indices,]
+data.test <- tournament.data[test_indices,]
+data.validate <- tournament.data[validate_indices,]
+
+X <-model.matrix(Upset~., data = data.train) [,-1] 
+Y <- data.train[, 2]
+set.seed(10) #to have same sets of K folds
+fit.cv <- cv.glmnet(X, Y, alpha = 1, family = "binomial", nfolds = 10, type.measure = "auc")
+plot(fit.cv)
+
+coef.1se <- coef(fit.cv, s="lambda.1se")  
+coef.1se <- coef.1se[which(coef.1se !=0),] 
+rownames(as.matrix(coef.1se))  
+
+#refit variables from above using logistic regression
+fit.logit.1se <- glm(Upset~HiSeedConference+HiSeed.SP3P+LoSeed.margin+DayNum+LoSeed.SP3P+HiSeedrank+LoSeed.SMDR+LoSeedrank+HiSeed.margin, family=binomial, data=data.train)
+Anova(fit.logit.1se)
+
+#Removed HiSeedConference
+fit.logit.1se <- glm(Upset~HiSeed.SP3P+LoSeed.margin+DayNum+LoSeed.SP3P+HiSeedrank+LoSeed.SMDR+LoSeedrank+HiSeed.margin, family=binomial, data=data.train)
+Anova(fit.logit.1se)
+
+#removedLoSeed.SMDR
+fit.logit.1se <- glm(Upset~HiSeed.SP3P+LoSeed.margin+DayNum+LoSeed.SP3P+HiSeedrank+LoSeedrank+HiSeed.margin, family=binomial, data=data.train)
+
+#Summary of Fit
+summary(fit.logit.1se)
+Anova(fit.logit.1se)
+pander(Anova(fit.logit.1se))
+pander(summary(fit.logit.1se))
+
+
+predict.logit.1se <- glm(Upset~HiSeed.SP3P+LoSeed.margin+DayNum+LoSeed.SP3P+HiSeedrank+LoSeedrank+HiSeed.margin, family=binomial, data=data.test)
+logit.1se.roc <- roc(data.test$Upset, predict.logit.1se$fitted, plot = T, col = "blue")
+logit.1se.roc$auc
+
+```
+
+
+```{r}
+#LINEAR FIT
+#refit variables from above using linearregression
+data.train.cont <- data.train
+data.test.cont <- data.test
+data.train.cont$Upset <- as.numeric(as.character(data.train$Upset))
+data.test.cont$Upset <- as.numeric(as.character(data.test$Upset))
+
+fit.linear <- lm(Upset ~ factor(HiSeedConference)+HiSeed.SP3P+LoSeed.margin+factor(DayNum)+LoSeed.SP3P+HiSeedrank+LoSeed.SMDR+LoSeedrank+HiSeed.margin, data=data.train.cont)
+Anova(fit.linear)
+
+#removing hiseedconference
+fit.linear <- lm(Upset ~ HiSeed.SP3P+LoSeed.margin+factor(DayNum)+LoSeed.SP3P+HiSeedrank+LoSeed.SMDR+LoSeedrank+HiSeed.margin, data=data.train.cont)
+Anova(fit.linear)
+
+#removed LoSeedSMDER
+fit.linear <- lm(Upset ~ HiSeed.SP3P+LoSeed.margin+factor(DayNum)+LoSeed.SP3P+HiSeedrank+LoSeedrank+HiSeed.margin, data=data.train.cont)
+Anova(fit.linear)
+
+#removed HiSeed.Sp3p
+fit.linear <- lm(Upset ~ LoSeed.margin+factor(DayNum)+LoSeed.SP3P+HiSeedrank+LoSeedrank+HiSeed.margin, data=data.train.cont)
+pander(Anova(fit.linear))
+pander(summary(fit.linear))
+
+predict.linear <- lm(Upset~LoSeed.margin+factor(DayNum)+LoSeed.SP3P+HiSeedrank+LoSeedrank+HiSeed.margin, data=data.test.cont)
+linear.roc <- roc(data.test.cont$Upset, predict.linear$fitted, plot = T, col = "blue")
+linear.roc$auc
+
+```
+
+
+```{r}
+#Single Tree
+
+fit.tree <- rpart(Upset ~ HiSeed.SP3P + LoSeed.margin + DayNum + LoSeed.SP3P + HiSeedrank + LoSeed.SMDR + LoSeedrank + HiSeed.margin, data = data.train, minsplit = 80, cp = 0.0001) 
+plot(as.party(fit.tree), main = "Single tree Fit")
+
+predict.tree <- predict(fit.tree, newdata = data.test, type = "prob")
+rf.roc <- roc(data.test$Upset, predict.tree[,2], plot = TRUE)
+rf.roc$auc
+
+#RANDOM FOREST
+fit.rf.train <- randomForest(Upset ~., data.train, mtry = 3, ntree = 200)
+plot(fit.rf.train) #creates three curves of MCE of 1's, 0's, and overall
+legend("topright", colnames(fit.rf.train$err.rate), col = 1:3, cex = 0.8, fill = 1:3)
+
+mtryopt <- seq(1:14)
+for (i in 1:14){
+  fit.rf.train <- randomForest(Upset ~., data.train, mtry = i, ntree = 50)
+  predict.rf <- predict(fit.rf.train, newdata = data.test, type = "prob")
+  rf.roc <- roc(data.test$Upset, predict.rf[,2], plot = TRUE)
+  mtryopt[i] <- rf.roc$auc
+}
+mtryopt
+
+#optimal mtry = 13
+fit.rf.train <- randomForest(Upset ~., data.train, mtry = 1, ntree = 50)
+
+predict.rf <- predict(fit.rf.train, newdata = data.test, type = "prob")
+rf.test.error <- mean(data.test$Upset != predict.rf)
+rf.roc <- roc(data.test$Upset, predict.rf[,2], plot = TRUE)
+rf.roc$auc
+
+
+```
+
+```{r}
+#PCA
+#scaling and centering variables
+data.train.pca <- data.train.cont %>% select(Upset, HiSeedrank, LoSeedrank, HiSeed.SPFG, LoSeed.SPFG, HiSeed.SP3P, LoSeed.SP3P, HiSeed.SMDR, LoSeed.SMDR, HiSeed.SMAS, LoSeed.SMBK, HiSeed.margin, LoSeed.margin)
+
+sapply(data.train.pca, mean)
+sapply(data.train.pca, sd)
+data.pca.scale <- scale(data.train.pca, center = TRUE, scale = TRUE)
+is.matrix(data.pca.scale)
+data.pca.scale <- as.data.frame(data.pca.scale)
+
+pc.13 <- prcomp(data.pca.scale[,2:13], scale = TRUE)
+summary(pc.13)
+round(pc.13$rotation,5)
+
+#two lprinciple components 
+pc.1 <- pc.13$rotation[,1]
+pander(pc.1)
+
+#laeding two principle components
+plot(pc.13$x[,1], pc.13$x[,2], pch = 16,
+     xlim = c(-4,4),
+     ylim = c(-4,4),
+     main = "Leading Two Principal Components",
+     xlab = "Z1 = PC1",
+     ylab = "Z2 = PC2")
+abline (h = 0, v= 0)
+
+#cumulative Proportion of variance explained
+pve.13 <- 100* (pc.13$sdev)^2/sum ((pc.13$sdev)^2)
+plot(pve.13, pch=16, 
+     xlab="Principal Components",
+     ylab="Prop. of variance explained")
+
+data.train.pca <- data.frame(data.train.pca$Upset, pc.13$x)
+names(data.train.pca)
+fit.pca <- lm(data.train.pca.Upset~., data.train.pca)
+Anova(fit.pca)
+summary(fit.pca)
+
+```
+
+
+```{r}
+#testing on validation data
+
+
+predict.logit.validate <- glm(Upset~HiSeed.SP3P+LoSeed.margin+DayNum+LoSeed.SP3P+HiSeedrank+LoSeedrank+HiSeed.margin, family=binomial, data=data.validate)
+logit.validate.roc <- roc(data.validate$Upset, predict.logit.validate$fitted, plot = T, col = "blue")
+logit.validate.roc$auc
+
+```
+
+
+
+
+
+
